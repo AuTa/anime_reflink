@@ -1,7 +1,7 @@
 use std::{
     collections::{HashMap, HashSet},
     error::Error,
-    fs::{self, File},
+    fs::{self, DirEntry, File},
     path::Path,
     process::Command,
 };
@@ -51,13 +51,61 @@ impl Data {
         for dir_entry in entries.unwrap() {
             let dir_entry = dir_entry.unwrap();
             let name = dir_entry.file_name().into_string().unwrap();
-            if self.source_map.contains_key(&name) {
-                continue;
-            }
-            println!("new anime source: {}", name);
 
-            self.data.push_new_map(name, dir_entry.file_type().unwrap());
+            // 定义一个 push 函数, 根据不同的动作进行不同的处理.
+            let mut push_fn: fn(&mut RealData, String, FileType) = RealData::push_new_map;
+
+            if self.source_map.contains_key(&name) {
+                match self.config.action {
+                    Action::Renew => {
+                        push_fn = RealData::push_renew_map;
+                        println!("renew anime source: {}", name);
+                    }
+                    _ => continue,
+                }
+            } else {
+                println!("new anime source: {}", name);
+            }
+            let file_type = self.get_map_file_type(&name, &dir_entry);
+            push_fn(&mut self.data, name, file_type);
         }
+    }
+
+    // 获取文件类型.
+    pub fn get_map_file_type(&self, name: &str, dir_entry: &DirEntry) -> FileType {
+        let fs_file_type = dir_entry.file_type().unwrap();
+        let mut file_type: FileType = FileType::File;
+        if fs_file_type.is_file() {
+            // 排除 .parts 文件.
+            if name.ends_with(".parts") {
+                file_type = FileType::Other
+            }
+        } else if fs_file_type.is_dir() {
+            file_type = FileType::Dir;
+            let entries = fs::read_dir(&dir_entry.path());
+            if let Ok(entries) = entries {
+                // 判断是否嵌套.
+                // 先判断是否有其他文件,
+                // 再生成子目录的 SourceAnimeMap.
+                let (dir, other): (Vec<_>, Vec<_>) = entries
+                    .into_iter()
+                    .map(|x| x.unwrap())
+                    .partition(|x| x.file_type().unwrap().is_dir());
+                if other.len() == 0 {
+                    let maps = dir
+                        .iter()
+                        .map(|x| SourceAnimeMap {
+                            source: x.file_name().into_string().unwrap(),
+                            anime: "".to_string(),
+                            active: true,
+                            file_type: FileType::Dir,
+                        })
+                        .collect();
+                    file_type = FileType::Nesting(maps);
+                }
+            }
+        }
+        file_type
     }
 
     pub fn push_anime_from_dir(&mut self) -> Result<(), Box<dyn Error>> {
@@ -289,19 +337,34 @@ impl RealData {
     }
 
     // 添加文件夹映射.
-    pub fn push_new_map(&mut self, name: String, fs_file_type: fs::FileType) {
-        // 排除 ".parts" 的文件.
-        let mut file_type = FileType::File;
-        if fs_file_type.is_file() {
-            if name.ends_with(".parts") {
-                file_type = FileType::Other;
-            }
-        } else if fs_file_type.is_dir() {
-            file_type = FileType::Dir;
-        }
-
+    pub fn push_new_map(&mut self, name: String, file_type: FileType) {
         let anime_map = bulid_anime_map(name, "".to_string(), file_type);
         self.source_anime_maps.push(anime_map);
+    }
+
+    // 更新文件夹映射.
+    pub fn push_renew_map(&mut self, name: String, file_type: FileType) {
+        let anime_map = self.source_anime_maps.iter_mut().find(|x| x.source == name);
+        let anime_map = anime_map.unwrap();
+        let file_type: FileType = match &file_type {
+            FileType::Nesting(x) => {
+                // 嵌套文件夹要继承父文件夹对应的 anime.
+                // 这里所有权复杂，直接 clone 后修改.
+                let y = x
+                    .iter()
+                    .map(|y| {
+                        let mut z = y.clone();
+                        z.anime = anime_map.anime.clone();
+                        z
+                    })
+                    .collect();
+                FileType::Nesting(y)
+            }
+            _ => file_type,
+        };
+        if anime_map.file_type != file_type {
+            anime_map.file_type = file_type;
+        }
     }
 
     pub fn push_anime(&mut self, name: String) {

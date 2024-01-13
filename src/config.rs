@@ -13,11 +13,7 @@ impl Config {
         let action: Action;
 
         match args.get(1) {
-            Some(x) => match x.as_str() {
-                "test" => action = Action::Test,
-                "reflink" => action = Action::Reflink,
-                _ => action = Action::Test,
-            },
+            Some(x) => action = Action::from(x.as_str()),
             _ => action = Action::Test,
         }
         let mapfile_path = args
@@ -47,6 +43,7 @@ impl Config {
 #[derive(Debug)]
 pub enum Action {
     Test,
+    Renew,
     Reflink,
 }
 
@@ -55,7 +52,19 @@ impl fmt::Display for Action {
         use Action::*; // 非常方便的通配符用法，将枚举名称暂时放入方法上下文中.
         match self {
             Test => write!(f, "test"),
+            Renew => write!(f, "renew"),
             Reflink => write!(f, "reflink"),
+        }
+    }
+}
+
+impl From<&str> for Action {
+    fn from(s: &str) -> Self {
+        match s {
+            "test" => Action::Test,
+            "renew" => Action::Renew,
+            "reflink" => Action::Reflink,
+            _ => Action::Test,
         }
     }
 }
