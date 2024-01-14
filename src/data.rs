@@ -4,6 +4,7 @@ use std::{
     fs::{self, DirEntry, File},
     path::Path,
     process::Command,
+    usize,
 };
 
 use serde::{Deserialize, Serialize};
@@ -19,7 +20,6 @@ pub struct Data {
     // 从序列化中跳过.
     source_map: HashMap<String, ()>,
     config: Config,
-    anime_set: HashMap<String, HashSet<String>>,
 }
 
 impl Data {
@@ -32,7 +32,6 @@ impl Data {
             },
             source_map: HashMap::new(),
             config,
-            anime_set: HashMap::new(),
         };
 
         // 读取文件并且缓存已有数据.
@@ -109,8 +108,8 @@ impl Data {
     }
 
     pub fn push_anime_from_dir(&mut self) -> Result<(), Box<dyn Error>> {
-        let anima_dir = &self.config.anime_path;
-        let entries = fs::read_dir(anima_dir);
+        let anime_dir = &self.config.anime_path;
+        let entries = fs::read_dir(anime_dir);
         for dir_entry in entries? {
             let dir_entry = dir_entry?;
             let name = dir_entry.file_name().into_string().unwrap();
@@ -128,44 +127,105 @@ impl Data {
         Ok(())
     }
 
-    pub fn map_animes(&mut self) -> Result<(), Box<dyn Error>> {
-        let mut reflink_queue: Vec<usize> = Vec::new();
-        for i in 0..self.data.source_anime_maps.len() {
-            let source_anime_map = &self.data.source_anime_maps[i];
-
+    // 获取需要 relink 的 anime index.
+    // 因为无法同时更改 map 的 anime, 所以把 anime name 也存进去.
+    fn need_reflink_anime_indexes(
+        &self,
+        source_anime_maps: &Vec<SourceAnimeMap>,
+        anime_set: &mut HashMap<String, HashSet<String>>,
+    ) -> Option<Vec<(usize, usize, String)>> {
+        let mut indexes = Vec::<(usize, usize, String)>::new();
+        for i in 0..source_anime_maps.len() {
+            let source_anime_map = &source_anime_maps[i];
             if !source_anime_map.active {
                 continue;
             }
             if let FileType::Other = source_anime_map.file_type {
                 continue;
             }
-            if source_anime_map.anime.is_empty() {
+            if let FileType::Nesting(nesting) = &source_anime_map.file_type {
+                let nesting_indexes = self.need_reflink_anime_indexes(nesting, anime_set);
+                if let Some(nesting_indexes) = nesting_indexes {
+                    indexes.extend(nesting_indexes.iter().map(|x| (i, x.0, x.2.clone())));
+                }
+            } else if source_anime_map.anime.is_empty() {
                 let source = source_anime_map.source.clone();
-                let anime = self.find_exist_anime(source);
+                let anime = self.find_exist_anime(source, anime_set);
                 if anime.is_some() {
-                    self.data.source_anime_maps[i].anime = anime.unwrap();
-                    reflink_queue.push(i);
+                    let anime = anime.unwrap();
+                    indexes.push((i, 0, anime));
                 }
             } else {
-                reflink_queue.push(i);
+                indexes.push((i, 0, source_anime_map.anime.clone()));
             }
         }
-        if let Action::Reflink = self.config.action {
-            let mut successed_index: Vec<usize> = Vec::new();
-            for i in reflink_queue {
-                if self.reflink_map(&self.data.source_anime_maps[i]).unwrap() {
-                    successed_index.push(i);
+        if indexes.len() > 0 {
+            Some(indexes)
+        } else {
+            None
+        }
+    }
+
+    pub fn map_animes(&mut self) -> Result<(), Box<dyn Error>> {
+        let mut anime_set = HashMap::<String, HashSet<String>>::new();
+        let maps = &self.data.source_anime_maps;
+        let reflink_queue = self.need_reflink_anime_indexes(maps, &mut anime_set);
+        if let Some(reflink_queue) = reflink_queue {
+            self.set_anime_name(&reflink_queue);
+            if let Action::Reflink = self.config.action {
+                let successed_index: Vec<(usize, usize)> = self.reflink(reflink_queue);
+                for i in successed_index {
+                    match &mut self.data.source_anime_maps[i.0].file_type {
+                        FileType::Nesting(maps) => {
+                            maps[i.1].active = false;
+                        }
+                        _ => self.data.source_anime_maps[i.0].active = false,
+                    }
                 }
-            }
-            for i in successed_index {
-                self.data.source_anime_maps[i].active = false;
             }
         }
         Ok(())
     }
 
-    fn find_exist_anime(&mut self, source: String) -> Option<String> {
-        for (anime, set) in &self.anime_set {
+    // 设置索引处的 map 的 anime name.
+    fn set_anime_name(&mut self, reflink_queue: &Vec<(usize, usize, String)>) {
+        for i in reflink_queue {
+            match &mut self.data.source_anime_maps[i.0].file_type {
+                FileType::Nesting(maps) => {
+                    maps[i.1].anime = i.2.clone();
+                }
+                _ => self.data.source_anime_maps[i.0].anime = i.2.clone(),
+            }
+        }
+    }
+
+    fn reflink(&self, reflink_queue: Vec<(usize, usize, String)>) -> Vec<(usize, usize)> {
+        let mut successed_index: Vec<(usize, usize)> = Vec::new();
+        for i in reflink_queue {
+            let result: Result<(), _>;
+            match &self.data.source_anime_maps[i.0].file_type {
+                FileType::Nesting(maps) => {
+                    result = self.reflink_map(&maps[i.1]);
+                }
+                _ => result = self.reflink_map(&self.data.source_anime_maps[i.0]),
+            }
+
+            match result {
+                Ok(_) => {
+                    successed_index.push((i.0, i.1));
+                }
+                Err(e) => println!("reflink error:{}", e),
+            }
+        }
+        successed_index
+    }
+
+    fn find_exist_anime(
+        &self,
+        source: String,
+        anime_set: &mut HashMap<String, HashSet<String>>,
+    ) -> Option<String> {
+        for (anime, set) in anime_set.iter() {
             if set.contains(&source) {
                 return Some(anime.clone());
             }
@@ -198,7 +258,7 @@ impl Data {
                 }
             }
         }
-        for (anime, set) in &self.anime_set {
+        for (anime, set) in &mut *anime_set {
             for _ in set.intersection(&source_set) {
                 return Some(anime.clone());
             }
@@ -223,15 +283,16 @@ impl Data {
         for i in 0..self.data.animes.len() {
             let anime = &self.data.animes[i].clone();
 
-            if self.anime_set.contains_key(anime) {
+            if anime_set.contains_key(anime) {
                 continue;
             }
-            let tree = self.fetch_anime_set(anime);
+            let tree = self.fetch_anime_set(anime, anime_set);
             if tree.contains(&source) {
                 return Some(anime.to_string());
             }
         }
-        for (anime, set) in &self.anime_set {
+
+        for (anime, set) in anime_set {
             for _ in set.intersection(&source_set) {
                 return Some(anime.clone());
             }
@@ -239,11 +300,12 @@ impl Data {
         None
     }
 
-    fn fetch_anime_set(&mut self, anime: &str) -> &HashSet<String> {
-        let set = self
-            .anime_set
-            .entry(anime.to_string())
-            .or_insert(HashSet::new());
+    fn fetch_anime_set<'a>(
+        &'a self,
+        anime: &str,
+        anime_set: &'a mut HashMap<String, HashSet<String>>,
+    ) -> &HashSet<String> {
+        let set = anime_set.entry(anime.to_string()).or_insert(HashSet::new());
         let anime_dir = &format!("{}/{}", &self.config.anime_path, anime);
 
         // 递归获取文件.
@@ -281,7 +343,7 @@ impl Data {
         set
     }
 
-    fn reflink_map(&self, source_anime_map: &SourceAnimeMap) -> Option<bool> {
+    fn reflink_map(&self, source_anime_map: &SourceAnimeMap) -> Result<(), Box<dyn Error>> {
         let source = &format!("{}/{}", self.config.source_path, source_anime_map.source);
         let anime = &format!("{}/{}", self.config.anime_path, source_anime_map.anime);
 
@@ -300,19 +362,19 @@ impl Data {
                     .arg(anime)
                     .output();
                 match output {
-                    Ok(_) => Some(true),
+                    Ok(_) => Ok(()),
                     Err(e) => {
                         println!("Error: {}", e);
-                        Some(false)
+                        Err(Box::new(e))
                     }
                 }
             }
             _ => {
-                println!(
+                let err = format!(
                     "Only support linux system. Source: {}, Anime: {}.",
                     source, anime
                 );
-                Some(false)
+                Err(err.into())
             }
         }
     }
