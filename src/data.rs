@@ -171,48 +171,23 @@ impl Data {
         let maps = &self.data.source_anime_maps;
         let reflink_queue = self.need_reflink_anime_indexes(maps, &mut anime_set);
         if let Some(reflink_queue) = reflink_queue {
-            self.set_anime_name(&reflink_queue);
+            self.data.set_anime_name(&reflink_queue);
             if let Action::Reflink = self.config.action {
-                let successed_index: Vec<(usize, usize)> = self.reflink(reflink_queue);
-                for i in successed_index {
-                    match &mut self.data.source_anime_maps[i.0].file_type {
-                        FileType::Nesting(maps) => {
-                            maps[i.1].active = false;
-                        }
-                        _ => self.data.source_anime_maps[i.0].active = false,
-                    }
-                }
+                let successed_index = self.reflink(&reflink_queue);
+                self.data.set_map_active(&successed_index);
             }
         }
         Ok(())
     }
 
-    // 设置索引处的 map 的 anime name.
-    fn set_anime_name(&mut self, reflink_queue: &Vec<(usize, usize, String)>) {
-        for i in reflink_queue {
-            match &mut self.data.source_anime_maps[i.0].file_type {
-                FileType::Nesting(maps) => {
-                    maps[i.1].anime = i.2.clone();
-                }
-                _ => self.data.source_anime_maps[i.0].anime = i.2.clone(),
-            }
-        }
-    }
+    fn reflink(&self, reflink_queue: &Vec<(usize, usize, String)>) -> Vec<(usize, usize, bool)> {
+        let mut successed_index: Vec<(usize, usize, bool)> = Vec::new();
 
-    fn reflink(&self, reflink_queue: Vec<(usize, usize, String)>) -> Vec<(usize, usize)> {
-        let mut successed_index: Vec<(usize, usize)> = Vec::new();
         for i in reflink_queue {
-            let result: Result<(), _>;
-            match &self.data.source_anime_maps[i.0].file_type {
-                FileType::Nesting(maps) => {
-                    result = self.reflink_map(&maps[i.1]);
-                }
-                _ => result = self.reflink_map(&self.data.source_anime_maps[i.0]),
-            }
-
-            match result {
+            let map = self.data.get_map_at_indexes((i.0, i.1));
+            match self.reflink_map(map) {
                 Ok(_) => {
-                    successed_index.push((i.0, i.1));
+                    successed_index.push((i.0, i.1, false));
                 }
                 Err(e) => println!("reflink error:{}", e),
             }
@@ -434,7 +409,49 @@ impl RealData {
             self.animes.push(name)
         }
     }
+
+    // 获取 map，可以嵌套.
+    fn get_map_at_indexes(&self, i: (usize, usize)) -> &SourceAnimeMap {
+        match &self.source_anime_maps[i.0].file_type {
+            FileType::Nesting(maps) => &maps[i.1],
+            _ => &self.source_anime_maps[i.0],
+        }
+    }
+
+    // 批量设置 map 的值.
+    fn set_batch_map<T: Clone>(
+        &mut self,
+        queue: &Vec<(usize, usize, T)>,
+        f: fn(&mut SourceAnimeMap, T),
+    ) {
+        for i in queue {
+            match &mut self.source_anime_maps[i.0].file_type {
+                FileType::Nesting(maps) => {
+                    f(&mut maps[i.1], i.2.clone());
+                }
+                _ => f(&mut self.source_anime_maps[i.0], i.2.clone()),
+            }
+        }
+    }
+
+    // 设置索引处的 map 的 anime name.
+    fn set_anime_name(&mut self, reflink_queue: &Vec<(usize, usize, String)>) {
+        // fn set<T: ToString>(map: &mut SourceAnimeMap, name: T) {
+        //     map.anime = name.to_string();
+        // }
+        let set = |map: &mut SourceAnimeMap, name: String| (*map).anime = name;
+        self.set_batch_map::<String>(reflink_queue, set)
+    }
+
+    fn set_map_active(&mut self, successed_index: &Vec<(usize, usize, bool)>) {
+        // fn set(map: &mut SourceAnimeMap, i: bool) {
+        //     map.active = i;
+        // }
+        let set = |map: &mut SourceAnimeMap, i: bool| (*map).active = i;
+        self.set_batch_map::<bool>(successed_index, set)
+    }
 }
+
 // 构建文件夹映射
 fn bulid_anime_map(source: String, anime: String, file_type: FileType) -> SourceAnimeMap {
     SourceAnimeMap {
