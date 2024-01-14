@@ -18,7 +18,7 @@ impl Config {
         }
         let mapfile_path = args
             .get(2) // 存在所有权问题，不使用 `unwrap_or_else`.
-            .unwrap_or(&"data.yaml".to_string())
+            .unwrap_or(&".data/data.yaml".to_string())
             .to_string();
         let source_path = args
             .get(3)
