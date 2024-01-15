@@ -170,12 +170,13 @@ impl Data {
         let mut anime_set = HashMap::<String, HashSet<String>>::new();
         let maps = &self.data.source_anime_maps;
         let reflink_queue = self.need_reflink_anime_indexes(maps, &mut anime_set);
-        if let Some(reflink_queue) = reflink_queue {
-            self.data.set_anime_name(&reflink_queue);
-            if let Action::Reflink = self.config.action {
-                let successed_index = self.reflink(&reflink_queue);
-                self.data.set_map_active(&successed_index);
-            }
+        let Some(reflink_queue) = reflink_queue else {
+            return Ok(());
+        };
+        self.data.set_anime_name(&reflink_queue);
+        if let Action::Reflink = self.config.action {
+            let successed_index = self.reflink(&reflink_queue);
+            self.data.set_map_active(&successed_index);
         }
         Ok(())
     }
@@ -210,25 +211,26 @@ impl Data {
         let mut source_set: HashSet<String> = HashSet::new();
         if let Ok(entries) = fs::read_dir(source_path) {
             for dir_entry in entries {
-                if let Ok(dir_entry) = dir_entry {
-                    let name = dir_entry.file_name().into_string().unwrap();
-                    if let Ok(file_type) = dir_entry.file_type() {
-                        if file_type.is_file() {
-                            // 排除非视频文件.
-                            if [".mkv", ".mp4", ".avi"]
-                                .iter()
-                                .map(|suffixes| name.ends_with(suffixes))
-                                .any(|x| x)
-                            {
-                                source_set.insert(name);
-                            }
-                        } else if file_type.is_dir() {
-                            // 当文件夹名称超过 20 个字符，或者以 "Season" 开头时,
-                            // 递归获取该文件夹下的文件.
-                            if name.len() > 20 || name.to_lowercase().starts_with("season") {
-                                source_set.insert(name);
-                            }
-                        }
+                let Ok(dir_entry) = dir_entry else { continue };
+
+                let name = dir_entry.file_name().into_string().unwrap();
+                let Ok(file_type) = dir_entry.file_type() else {
+                    continue;
+                };
+                if file_type.is_file() {
+                    // 排除非视频文件.
+                    if [".mkv", ".mp4", ".avi"]
+                        .iter()
+                        .map(|suffixes| name.ends_with(suffixes))
+                        .any(|x| x)
+                    {
+                        source_set.insert(name);
+                    }
+                } else if file_type.is_dir() {
+                    // 当文件夹名称超过 20 个字符，或者以 "Season" 开头时,
+                    // 递归获取该文件夹下的文件.
+                    if name.len() > 20 || name.to_lowercase().starts_with("season") {
+                        source_set.insert(name);
                     }
                 }
             }
@@ -285,30 +287,31 @@ impl Data {
 
         // 递归获取文件.
         fn fetch_set<P: AsRef<Path>>(set: &mut HashSet<String>, dir_path: P) {
-            if let Ok(entries) = fs::read_dir(dir_path) {
-                for dir_entry in entries {
-                    if let Ok(dir_entry) = dir_entry {
-                        let name = dir_entry.file_name().into_string().unwrap();
+            let Ok(entries) = fs::read_dir(dir_path) else {
+                return;
+            };
+            for dir_entry in entries {
+                let Ok(dir_entry) = dir_entry else { continue };
+                let name = dir_entry.file_name().into_string().unwrap();
 
-                        if let Ok(file_type) = dir_entry.file_type() {
-                            if file_type.is_file() {
-                                // 排除非视频文件.
-                                if [".mkv", ".mp4", ".avi"]
-                                    .iter()
-                                    .map(|suffixes| name.ends_with(suffixes))
-                                    .any(|x| x)
-                                {
-                                    set.insert(name);
-                                }
-                            } else if file_type.is_dir() {
-                                // 当文件夹名称超过 20 个字符，或者以 "Season" 开头时,
-                                // 递归获取该文件夹下的文件.
-                                if name.len() > 20 || name.to_lowercase().starts_with("season") {
-                                    set.insert(name);
-                                    fetch_set(set, &dir_entry.path());
-                                }
-                            }
-                        }
+                let Ok(file_type) = dir_entry.file_type() else {
+                    continue;
+                };
+                if file_type.is_file() {
+                    // 排除非视频文件.
+                    if [".mkv", ".mp4", ".avi"]
+                        .iter()
+                        .map(|suffixes| name.ends_with(suffixes))
+                        .any(|x| x)
+                    {
+                        set.insert(name);
+                    }
+                } else if file_type.is_dir() {
+                    // 当文件夹名称超过 20 个字符，或者以 "Season" 开头时,
+                    // 递归获取该文件夹下的文件.
+                    if name.len() > 20 || name.to_lowercase().starts_with("season") {
+                        set.insert(name);
+                        fetch_set(set, &dir_entry.path());
                     }
                 }
             }
