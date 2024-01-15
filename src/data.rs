@@ -464,3 +464,92 @@ fn bulid_anime_map(source: String, anime: String, file_type: FileType) -> Source
         file_type,
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn get_real_data() -> RealData {
+        RealData {
+            source_anime_maps: vec![
+                SourceAnimeMap {
+                    source: "file_source".to_string(),
+                    anime: "file_anime".to_string(),
+                    active: true,
+                    file_type: FileType::File,
+                },
+                SourceAnimeMap {
+                    source: "dir_source".to_string(),
+                    anime: "dir_anime".to_string(),
+                    active: true,
+                    file_type: FileType::Dir,
+                },
+                SourceAnimeMap {
+                    source: "nesting_source".to_string(),
+                    anime: "nesting_anime".to_string(),
+                    active: true,
+                    file_type: FileType::Nesting(vec![
+                        SourceAnimeMap {
+                            source: "nesting_file_source".to_string(),
+                            anime: "nesting_file_anime".to_string(),
+                            active: true,
+                            file_type: FileType::File,
+                        },
+                        SourceAnimeMap {
+                            source: "nesting_dir_source".to_string(),
+                            anime: "nesting_dir_anime".to_string(),
+                            active: true,
+                            file_type: FileType::Dir,
+                        },
+                    ]),
+                },
+            ],
+            animes: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn get_map_at_indexes() {
+        let real_data = get_real_data();
+        assert_eq!(
+            real_data.get_map_at_indexes((0, 0)),
+            &real_data.source_anime_maps[0]
+        );
+        let FileType::Nesting(nesting) = &real_data.source_anime_maps[2].file_type else {
+            panic!("")
+        };
+        assert_eq!(real_data.get_map_at_indexes((2, 1)), &nesting[1]);
+    }
+
+    #[test]
+    fn set_anime_name() {
+        let mut real_data = get_real_data();
+        real_data.set_anime_name(&vec![(0, 0, "new_anime".to_string())]);
+        assert_eq!(
+            real_data.source_anime_maps[0].anime,
+            "new_anime".to_string()
+        );
+        real_data.set_anime_name(&vec![(2, 1, "new_nesting_anime".to_string())]);
+        let FileType::Nesting(nesting) = &real_data.source_anime_maps[2].file_type else {
+            panic!("")
+        };
+        assert_eq!(nesting[1].anime, "new_nesting_anime".to_string());
+    }
+
+    #[test]
+    fn set_map_active() {
+        let mut real_data = get_real_data();
+
+        real_data.set_map_active(&vec![(0, 0, false)]);
+        assert_eq!(real_data.source_anime_maps[0].active, false);
+
+        real_data.set_map_active(&vec![(2, 1, false)]);
+        let FileType::Nesting(nesting) = &real_data.source_anime_maps[2].file_type else {
+            panic!("")
+        };
+        assert_eq!(nesting[1].active, false);
+
+        real_data.set_map_active(&vec![(0, 0, true)]);
+        assert_eq!(real_data.source_anime_maps[0].active, true);
+    }
+}

@@ -68,3 +68,63 @@ impl From<&str> for Action {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn config() {
+        let args: Vec<String> = vec![];
+        let config = Config::new(&args);
+        assert_eq!(config.action.to_string(), Action::Test.to_string());
+        assert_eq!(
+            config.mapfile_path, ".data/data.yaml",
+            "mapfile_path {}",
+            config.mapfile_path
+        );
+        assert_eq!(config.source_path, "X:\\SOURCE");
+        assert_eq!(config.anime_path, "X:\\ANIME");
+
+        let args = vec![
+            "".to_string(),
+            "renew".to_string(),
+            ".data/data.1.yaml".to_string(),
+            "./SOURCE".to_string(),
+            "./ANIME".to_string(),
+        ];
+        let config = Config::new(&args);
+        assert_eq!(config.action.to_string(), Action::Renew.to_string());
+        assert_eq!(
+            config.mapfile_path, ".data/data.1.yaml",
+            "mapfile_path {}",
+            config.mapfile_path
+        );
+        assert_eq!(config.source_path, "./SOURCE");
+        assert_eq!(config.anime_path, "./ANIME");
+
+        let args = vec!["".to_string(), "reflink".to_string()];
+        let config = Config::new(&args);
+        assert_eq!(config.action.to_string(), Action::Reflink.to_string());
+    }
+
+    #[test]
+    fn action_from() {
+        assert!(match Action::from("test") {
+            Action::Test => true,
+            _ => false,
+        });
+        assert!(match Action::from("renew") {
+            Action::Renew => true,
+            _ => false,
+        });
+        assert!(match Action::from("reflink") {
+            Action::Reflink => true,
+            _ => false,
+        });
+        assert!(match Action::from("nottest") {
+            Action::Test => true,
+            _ => false,
+        });
+    }
+}
