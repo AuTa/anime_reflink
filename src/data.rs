@@ -23,21 +23,27 @@ pub struct Data {
 }
 
 impl Data {
+    pub fn new(config: Config) -> Data {
+        Data {
+            data: RealData::default(),
+            source_map: HashMap::default(),
+            config,
+        }
+    }
+
     // 从 yaml 文件中读取数据.
     pub fn from_yaml(config: Config) -> Data {
+        // 读取文件并且缓存已有数据.
+        let Ok(file) = File::open(&config.mapfile_path) else {
+            return Data::new(config);
+        };
+        let real_data = RealData::from_file(file);
         let mut data: Data = Data {
-            data: RealData {
-                source_anime_maps: Vec::new(),
-                animes: Vec::new(),
-            },
+            data: real_data,
             source_map: HashMap::new(),
             config,
         };
 
-        // 读取文件并且缓存已有数据.
-        if let Ok(file) = File::open(&data.config.mapfile_path) {
-            data.data.from_file(file);
-        }
         for i in &data.data.source_anime_maps {
             let name = i.source.clone();
             data.source_map.insert(name, ());
@@ -81,7 +87,7 @@ impl Data {
             }
         } else if fs_file_type.is_dir() {
             file_type = FileType::Dir;
-            let entries = fs::read_dir(&dir_entry.path());
+            let entries = fs::read_dir(dir_entry.path());
             if let Ok(entries) = entries {
                 // 判断是否嵌套.
                 // 先判断是否有其他文件,
@@ -90,7 +96,7 @@ impl Data {
                     .into_iter()
                     .map(|x| x.unwrap())
                     .partition(|x| x.file_type().unwrap().is_dir());
-                if other.len() == 0 {
+                if other.is_empty() {
                     let maps = dir
                         .iter()
                         .map(|x| SourceAnimeMap {
@@ -131,35 +137,34 @@ impl Data {
     // 因为无法同时更改 map 的 anime, 所以把 anime name 也存进去.
     fn need_reflink_anime_indexes(
         &self,
-        source_anime_maps: &Vec<SourceAnimeMap>,
+        source_anime_maps: &[SourceAnimeMap],
         anime_set: &mut HashMap<String, HashSet<String>>,
     ) -> Option<Vec<(usize, usize, String)>> {
         let mut indexes = Vec::<(usize, usize, String)>::new();
-        for i in 0..source_anime_maps.len() {
-            let source_anime_map = &source_anime_maps[i];
-            if !source_anime_map.active {
+        for (i, map) in source_anime_maps.iter().enumerate() {
+            if !map.active {
                 continue;
             }
-            if let FileType::Other = source_anime_map.file_type {
+            if let FileType::Other = map.file_type {
                 continue;
             }
-            if let FileType::Nesting(nesting) = &source_anime_map.file_type {
+            if let FileType::Nesting(nesting) = &map.file_type {
                 let nesting_indexes = self.need_reflink_anime_indexes(nesting, anime_set);
                 if let Some(nesting_indexes) = nesting_indexes {
                     indexes.extend(nesting_indexes.iter().map(|x| (i, x.0, x.2.clone())));
                 }
-            } else if source_anime_map.anime.is_empty() {
-                let source = source_anime_map.source.clone();
+            } else if map.anime.is_empty() {
+                let source = map.source.clone();
                 let anime = self.find_exist_anime(source, anime_set);
                 if anime.is_some() {
                     let anime = anime.unwrap();
                     indexes.push((i, 0, anime));
                 }
             } else {
-                indexes.push((i, 0, source_anime_map.anime.clone()));
+                indexes.push((i, 0, map.anime.clone()));
             }
         }
-        if indexes.len() > 0 {
+        if !indexes.is_empty() {
             Some(indexes)
         } else {
             None
@@ -218,7 +223,7 @@ impl Data {
             }
         }
         for (anime, set) in &mut *anime_set {
-            for _ in set.intersection(&source_set) {
+            if set.intersection(&source_set).next().is_some() {
                 return Some(anime.clone());
             }
         }
@@ -252,7 +257,7 @@ impl Data {
         }
 
         for (anime, set) in anime_set {
-            for _ in set.intersection(&source_set) {
+            if set.intersection(&source_set).next().is_some() {
                 return Some(anime.clone());
             }
         }
@@ -264,7 +269,7 @@ impl Data {
         anime: &str,
         anime_set: &'a mut HashMap<String, HashSet<String>>,
     ) -> &HashSet<String> {
-        let set = anime_set.entry(anime.to_string()).or_insert(HashSet::new());
+        let set = anime_set.entry(anime.to_string()).or_default();
         let anime_dir = Path::new(&self.config.anime_path).join(anime);
 
         Self::fetch_set(set, anime_dir);
@@ -278,12 +283,13 @@ impl Data {
         };
         // HACK: 关于 flatten 和 filter_map 的讨论:
         // https://users.rust-lang.org/t/where-is-flatten-skipping-none-documented/89255/21
-        // https://github.com/rust-lang/rust-clippy/issues/9377 
+        // https://github.com/rust-lang/rust-clippy/issues/9377
         // https://github.com/rust-lang/rust/pull/99230
         // https://rust.godbolt.org/z/aG444qGdW
         // filter_map(|x| x), filter_map(identity), flatten.
-        entries.flatten()
-            .filter_map(|dir_entry| Self::filter_file_dir(dir_entry))
+        entries
+            .flatten()
+            .filter_map(Self::filter_file_dir)
             .for_each(|(name, path)| {
                 set.insert(name);
                 if path.as_os_str() != "" {
@@ -358,7 +364,7 @@ impl Data {
     }
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, Default)]
 pub struct RealData {
     pub source_anime_maps: Vec<SourceAnimeMap>, // 文件夹映射.
     pub animes: Vec<String>,                    // 动漫列表.
@@ -366,14 +372,16 @@ pub struct RealData {
 
 impl RealData {
     // 从文件中读取数据.
-    fn from_file(&mut self, file: File) {
+    fn from_file(file: File) -> RealData {
+        let mut real_data = Self::default();
         // serde_yaml::from_reader::<&File, Data> 指定泛型类型.
         if let Ok(exist_data) = serde_yaml::from_reader::<&File, RealData>(&file) {
             let maps = exist_data.source_anime_maps;
-            if maps.len() > 0 {
-                self.source_anime_maps.extend(maps);
+            if !maps.is_empty() {
+                real_data.source_anime_maps.extend(maps);
             }
         }
+        real_data
     }
 
     // 添加文件夹映射.
@@ -442,7 +450,7 @@ impl RealData {
         // fn set<T: ToString>(map: &mut SourceAnimeMap, name: T) {
         //     map.anime = name.to_string();
         // }
-        let set = |map: &mut SourceAnimeMap, name: String| (*map).anime = name;
+        let set = |map: &mut SourceAnimeMap, name: String| map.anime = name;
         self.set_batch_map::<String>(reflink_queue, set)
     }
 
@@ -450,7 +458,7 @@ impl RealData {
         // fn set(map: &mut SourceAnimeMap, i: bool) {
         //     map.active = i;
         // }
-        let set = |map: &mut SourceAnimeMap, i: bool| (*map).active = i;
+        let set = |map: &mut SourceAnimeMap, i: bool| map.active = i;
         self.set_batch_map::<bool>(successed_index, set)
     }
 }
@@ -532,7 +540,7 @@ mod tests {
                 fs::create_dir(nesting_path.join(i))?;
             }
         }
-        Ok(&tep_dir)
+        Ok(tep_dir)
     }
 
     mod data_tests {
@@ -542,7 +550,7 @@ mod tests {
             Data {
                 data: get_real_data(),
                 source_map: HashMap::new(),
-                config: Config::new(&vec![]),
+                config: Config::new(&[]),
             }
         }
 
@@ -603,16 +611,16 @@ mod tests {
             let mut real_data = get_real_data();
 
             real_data.set_map_active(&vec![(0, 0, false)]);
-            assert_eq!(real_data.source_anime_maps[0].active, false);
+            assert!(!real_data.source_anime_maps[0].active);
 
             real_data.set_map_active(&vec![(2, 1, false)]);
             let FileType::Nesting(nesting) = &real_data.source_anime_maps[2].file_type else {
                 panic!("")
             };
-            assert_eq!(nesting[1].active, false);
+            assert!(!nesting[1].active);
 
             real_data.set_map_active(&vec![(0, 0, true)]);
-            assert_eq!(real_data.source_anime_maps[0].active, true);
+            assert!(real_data.source_anime_maps[0].active);
         }
     }
 }

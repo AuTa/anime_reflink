@@ -10,12 +10,10 @@ pub struct Config {
 
 impl Config {
     pub fn new(args: &[String]) -> Config {
-        let action: Action;
-
-        match args.get(1) {
-            Some(x) => action = Action::from(x.as_str()),
-            _ => action = Action::Test,
-        }
+        let action: Action = match args.get(1) {
+            Some(x) => Action::from(x.as_str()),
+            _ => Action::Test,
+        };
         let mapfile_path = args
             .get(2) // 存在所有权问题，不使用 `unwrap_or_else`.
             .unwrap_or(&".data/data.yaml".to_string())
@@ -110,21 +108,9 @@ mod tests {
 
     #[test]
     fn action_from() {
-        assert!(match Action::from("test") {
-            Action::Test => true,
-            _ => false,
-        });
-        assert!(match Action::from("renew") {
-            Action::Renew => true,
-            _ => false,
-        });
-        assert!(match Action::from("reflink") {
-            Action::Reflink => true,
-            _ => false,
-        });
-        assert!(match Action::from("nottest") {
-            Action::Test => true,
-            _ => false,
-        });
+        assert!(matches!(Action::from("test"), Action::Test));
+        assert!(matches!(Action::from("renew"), Action::Renew));
+        assert!(matches!(Action::from("reflink"), Action::Reflink));
+        assert!(matches!(Action::from("nottest"), Action::Test));
     }
 }
