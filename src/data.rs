@@ -2,7 +2,7 @@ use std::{
     collections::{HashMap, HashSet},
     error::Error,
     fs::{self, DirEntry, File},
-    path::Path,
+    path::{Path, PathBuf},
     process::Command,
     usize,
 };
@@ -207,32 +207,14 @@ impl Data {
             }
         }
 
-        let source_path = &format!("{}/{}", self.config.source_path, source);
+        let source_path = Path::new(&self.config.source_path).join(&source);
         let mut source_set: HashSet<String> = HashSet::new();
         if let Ok(entries) = fs::read_dir(source_path) {
-            for dir_entry in entries {
-                let Ok(dir_entry) = dir_entry else { continue };
-
-                let name = dir_entry.file_name().into_string().unwrap();
-                let Ok(file_type) = dir_entry.file_type() else {
+            for dir_entry in entries.flatten() {
+                let Some((name, _)) = Self::filter_file_dir(dir_entry) else {
                     continue;
                 };
-                if file_type.is_file() {
-                    // 排除非视频文件.
-                    if [".mkv", ".mp4", ".avi"]
-                        .iter()
-                        .map(|suffixes| name.ends_with(suffixes))
-                        .any(|x| x)
-                    {
-                        source_set.insert(name);
-                    }
-                } else if file_type.is_dir() {
-                    // 当文件夹名称超过 20 个字符，或者以 "Season" 开头时,
-                    // 递归获取该文件夹下的文件.
-                    if name.len() > 20 || name.to_lowercase().starts_with("season") {
-                        source_set.insert(name);
-                    }
-                }
+                source_set.insert(name);
             }
         }
         for (anime, set) in &mut *anime_set {
@@ -283,42 +265,60 @@ impl Data {
         anime_set: &'a mut HashMap<String, HashSet<String>>,
     ) -> &HashSet<String> {
         let set = anime_set.entry(anime.to_string()).or_insert(HashSet::new());
-        let anime_dir = &format!("{}/{}", &self.config.anime_path, anime);
+        let anime_dir = Path::new(&self.config.anime_path).join(anime);
 
-        // 递归获取文件.
-        fn fetch_set<P: AsRef<Path>>(set: &mut HashSet<String>, dir_path: P) {
-            let Ok(entries) = fs::read_dir(dir_path) else {
-                return;
-            };
-            for dir_entry in entries {
-                let Ok(dir_entry) = dir_entry else { continue };
-                let name = dir_entry.file_name().into_string().unwrap();
+        Self::fetch_set(set, anime_dir);
+        set
+    }
 
-                let Ok(file_type) = dir_entry.file_type() else {
-                    continue;
-                };
-                if file_type.is_file() {
-                    // 排除非视频文件.
-                    if [".mkv", ".mp4", ".avi"]
-                        .iter()
-                        .map(|suffixes| name.ends_with(suffixes))
-                        .any(|x| x)
-                    {
-                        set.insert(name);
-                    }
-                } else if file_type.is_dir() {
-                    // 当文件夹名称超过 20 个字符，或者以 "Season" 开头时,
-                    // 递归获取该文件夹下的文件.
-                    if name.len() > 20 || name.to_lowercase().starts_with("season") {
-                        set.insert(name);
-                        fetch_set(set, &dir_entry.path());
-                    }
+    // 递归获取文件.
+    fn fetch_set<P: AsRef<Path>>(set: &mut HashSet<String>, dir_path: P) {
+        let Ok(entries) = fs::read_dir(dir_path) else {
+            return;
+        };
+        // HACK: 关于 flatten 和 filter_map 的讨论:
+        // https://users.rust-lang.org/t/where-is-flatten-skipping-none-documented/89255/21
+        // https://github.com/rust-lang/rust-clippy/issues/9377 
+        // https://github.com/rust-lang/rust/pull/99230
+        // https://rust.godbolt.org/z/aG444qGdW
+        // filter_map(|x| x), filter_map(identity), flatten.
+        entries.flatten()
+            .filter_map(|dir_entry| Self::filter_file_dir(dir_entry))
+            .for_each(|(name, path)| {
+                set.insert(name);
+                if path.as_os_str() != "" {
+                    Self::fetch_set(set, path);
                 }
+            });
+    }
+
+    // 过滤非视频文件或者特殊文件夹.
+    // 返回文件名和文件夹路径.
+    fn filter_file_dir(dir_entry: DirEntry) -> Option<(String, PathBuf)> {
+        let Ok(file_type) = dir_entry.file_type() else {
+            return None;
+        };
+        let Ok(name) = dir_entry.file_name().into_string() else {
+            return None;
+        };
+
+        if file_type.is_file() {
+            // 排除非视频文件.
+            if [".mkv", ".mp4", ".avi"]
+                .iter()
+                .map(|suffixes| name.ends_with(suffixes))
+                .any(|x| x)
+            {
+                return Some((name, "".into()));
+            }
+        } else if file_type.is_dir() {
+            // 当文件夹名称超过 20 个字符，或者以 "Season" 开头时,
+            // 返回文件夹路径备用.
+            if name.len() > 20 || name.to_lowercase().starts_with("season") {
+                return Some((name, dir_entry.path()));
             }
         }
-
-        fetch_set(set, anime_dir);
-        set
+        None
     }
 
     fn reflink_map(&self, source_anime_map: &SourceAnimeMap) -> Result<(), Box<dyn Error>> {
@@ -468,6 +468,7 @@ fn bulid_anime_map(source: String, anime: String, file_type: FileType) -> Source
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tempfile::*;
 
     fn get_real_data() -> RealData {
         RealData {
@@ -508,48 +509,110 @@ mod tests {
         }
     }
 
-    #[test]
-    fn get_map_at_indexes() {
-        let real_data = get_real_data();
-        assert_eq!(
-            real_data.get_map_at_indexes((0, 0)),
-            &real_data.source_anime_maps[0]
-        );
-        let FileType::Nesting(nesting) = &real_data.source_anime_maps[2].file_type else {
-            panic!("")
-        };
-        assert_eq!(real_data.get_map_at_indexes((2, 1)), &nesting[1]);
+    fn temp_anime_dir(tep_dir: &TempDir) -> Result<&TempDir, Box<dyn Error>> {
+        let binding = tep_dir.path().join("anime");
+        let anime_path = binding.as_path();
+        fs::create_dir(anime_path)?;
+        for i in ["AIR [青空]", "Just Because!", "true tears [真实之泪]"] {
+            fs::create_dir(anime_path.join(i))?;
+        }
+        let binding = anime_path.join("君の名は。 [你的名字。]");
+        let nesting_path = binding.as_path();
+        fs::create_dir(nesting_path)?;
+        for i in [
+            "SPs",
+            "Season 01",
+            "[VCB-Studio] Kimi no Na wa [Ma10p_1080p]",
+            "[VCB-Studio] Kimi no Na wa [Ma10p_1080p][x265_flac].mkv",
+            "readme about WebP.txt",
+        ] {
+            if i.ends_with(".mkv") | i.ends_with(".txt") {
+                File::create(nesting_path.join(i))?;
+            } else {
+                fs::create_dir(nesting_path.join(i))?;
+            }
+        }
+        Ok(&tep_dir)
     }
 
-    #[test]
-    fn set_anime_name() {
-        let mut real_data = get_real_data();
-        real_data.set_anime_name(&vec![(0, 0, "new_anime".to_string())]);
-        assert_eq!(
-            real_data.source_anime_maps[0].anime,
-            "new_anime".to_string()
-        );
-        real_data.set_anime_name(&vec![(2, 1, "new_nesting_anime".to_string())]);
-        let FileType::Nesting(nesting) = &real_data.source_anime_maps[2].file_type else {
-            panic!("")
-        };
-        assert_eq!(nesting[1].anime, "new_nesting_anime".to_string());
+    mod data_tests {
+        use super::*;
+
+        fn create_data() -> Data {
+            Data {
+                data: get_real_data(),
+                source_map: HashMap::new(),
+                config: Config::new(&vec![]),
+            }
+        }
+
+        #[test]
+        fn fetch_anime_set() {
+            let tep_dir = tempdir_in("./").unwrap();
+            temp_anime_dir(&tep_dir).unwrap();
+            let mut data = create_data();
+            data.config.anime_path = tep_dir.path().join("anime").to_str().unwrap().to_string();
+            let mut anime_set: HashMap<String, HashSet<String>> = HashMap::new();
+            let set = data.fetch_anime_set("君の名は。 [你的名字。]", &mut anime_set);
+            assert_eq!(
+                set,
+                &HashSet::from([
+                    "[VCB-Studio] Kimi no Na wa [Ma10p_1080p][x265_flac].mkv".to_string(),
+                    "[VCB-Studio] Kimi no Na wa [Ma10p_1080p]".to_string(),
+                    "Season 01".to_string()
+                ]),
+                "set is {:?}",
+                set
+            );
+        }
     }
 
-    #[test]
-    fn set_map_active() {
-        let mut real_data = get_real_data();
+    mod read_data_tests {
+        use super::*;
 
-        real_data.set_map_active(&vec![(0, 0, false)]);
-        assert_eq!(real_data.source_anime_maps[0].active, false);
+        #[test]
+        fn get_map_at_indexes() {
+            let real_data = get_real_data();
+            assert_eq!(
+                real_data.get_map_at_indexes((0, 0)),
+                &real_data.source_anime_maps[0]
+            );
+            let FileType::Nesting(nesting) = &real_data.source_anime_maps[2].file_type else {
+                panic!("")
+            };
+            assert_eq!(real_data.get_map_at_indexes((2, 1)), &nesting[1]);
+        }
 
-        real_data.set_map_active(&vec![(2, 1, false)]);
-        let FileType::Nesting(nesting) = &real_data.source_anime_maps[2].file_type else {
-            panic!("")
-        };
-        assert_eq!(nesting[1].active, false);
+        #[test]
+        fn set_anime_name() {
+            let mut real_data = get_real_data();
+            real_data.set_anime_name(&vec![(0, 0, "new_anime".to_string())]);
+            assert_eq!(
+                real_data.source_anime_maps[0].anime,
+                "new_anime".to_string()
+            );
+            real_data.set_anime_name(&vec![(2, 1, "new_nesting_anime".to_string())]);
+            let FileType::Nesting(nesting) = &real_data.source_anime_maps[2].file_type else {
+                panic!("")
+            };
+            assert_eq!(nesting[1].anime, "new_nesting_anime".to_string());
+        }
 
-        real_data.set_map_active(&vec![(0, 0, true)]);
-        assert_eq!(real_data.source_anime_maps[0].active, true);
+        #[test]
+        fn set_map_active() {
+            let mut real_data = get_real_data();
+
+            real_data.set_map_active(&vec![(0, 0, false)]);
+            assert_eq!(real_data.source_anime_maps[0].active, false);
+
+            real_data.set_map_active(&vec![(2, 1, false)]);
+            let FileType::Nesting(nesting) = &real_data.source_anime_maps[2].file_type else {
+                panic!("")
+            };
+            assert_eq!(nesting[1].active, false);
+
+            real_data.set_map_active(&vec![(0, 0, true)]);
+            assert_eq!(real_data.source_anime_maps[0].active, true);
+        }
     }
 }
