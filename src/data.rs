@@ -1,15 +1,14 @@
+use serde::{Deserialize, Serialize};
 use std::{
     collections::{HashMap, HashSet},
     error::Error,
     fs::{self, DirEntry, File},
     path::{Path, PathBuf},
     process::Command,
-    usize,
 };
 
-use serde::{Deserialize, Serialize};
-
 use crate::{
+    cache::{Cache, CacheMap},
     config::{Action, Config},
     source_anime_map::{FileType, SourceAnimeMap},
 };
@@ -133,12 +132,27 @@ impl Data {
         Ok(())
     }
 
+    pub fn map_animes(&mut self) -> Result<(), Box<dyn Error>> {
+        let mut anime_cache = CacheMap::default();
+        let maps = &self.data.source_anime_maps;
+        let reflink_queue = self.need_reflink_anime_indexes(maps, &mut anime_cache);
+        let Some(reflink_queue) = reflink_queue else {
+            return Ok(());
+        };
+        self.data.set_anime_name(&reflink_queue);
+        if let Action::Reflink = self.config.action {
+            let successed_index = self.reflink(&reflink_queue);
+            self.data.set_map_active(&successed_index);
+        }
+        Ok(())
+    }
+
     // 获取需要 relink 的 anime index.
     // 因为无法同时更改 map 的 anime, 所以把 anime name 也存进去.
     fn need_reflink_anime_indexes(
         &self,
         source_anime_maps: &[SourceAnimeMap],
-        anime_set: &mut HashMap<String, HashSet<String>>,
+        anime_cache: &mut CacheMap,
     ) -> Option<Vec<(usize, usize, String)>> {
         let mut indexes = Vec::<(usize, usize, String)>::new();
         for (i, map) in source_anime_maps.iter().enumerate() {
@@ -149,13 +163,13 @@ impl Data {
                 continue;
             }
             if let FileType::Nesting(nesting) = &map.file_type {
-                let nesting_indexes = self.need_reflink_anime_indexes(nesting, anime_set);
+                let nesting_indexes = self.need_reflink_anime_indexes(nesting, anime_cache);
                 if let Some(nesting_indexes) = nesting_indexes {
                     indexes.extend(nesting_indexes.iter().map(|x| (i, x.0, x.2.clone())));
                 }
             } else if map.anime.is_empty() {
                 let source = map.source.clone();
-                let anime = self.find_exist_anime(source, anime_set);
+                let anime = self.find_exist_anime(source, anime_cache);
                 if anime.is_some() {
                     let anime = anime.unwrap();
                     indexes.push((i, 0, anime));
@@ -169,21 +183,6 @@ impl Data {
         } else {
             None
         }
-    }
-
-    pub fn map_animes(&mut self) -> Result<(), Box<dyn Error>> {
-        let mut anime_set = HashMap::<String, HashSet<String>>::new();
-        let maps = &self.data.source_anime_maps;
-        let reflink_queue = self.need_reflink_anime_indexes(maps, &mut anime_set);
-        let Some(reflink_queue) = reflink_queue else {
-            return Ok(());
-        };
-        self.data.set_anime_name(&reflink_queue);
-        if let Action::Reflink = self.config.action {
-            let successed_index = self.reflink(&reflink_queue);
-            self.data.set_map_active(&successed_index);
-        }
-        Ok(())
     }
 
     fn reflink(&self, reflink_queue: &Vec<(usize, usize, String)>) -> Vec<(usize, usize, bool)> {
@@ -201,13 +200,9 @@ impl Data {
         successed_index
     }
 
-    fn find_exist_anime(
-        &self,
-        source: String,
-        anime_set: &mut HashMap<String, HashSet<String>>,
-    ) -> Option<String> {
-        for (anime, set) in anime_set.iter() {
-            if set.contains(&source) {
+    fn find_exist_anime(&self, source: String, anime_cache: &mut CacheMap) -> Option<String> {
+        for (anime, cache) in anime_cache.iter() {
+            if cache.contains(&source) {
                 return Some(anime.clone());
             }
         }
@@ -222,8 +217,8 @@ impl Data {
                 source_set.insert(name);
             }
         }
-        for (anime, set) in &mut *anime_set {
-            if set.intersection(&source_set).next().is_some() {
+        for (anime, cache) in &mut *anime_cache {
+            if cache.contains_set(&source_set) {
                 return Some(anime.clone());
             }
         }
@@ -247,37 +242,33 @@ impl Data {
         for i in 0..self.data.animes.len() {
             let anime = &self.data.animes[i].clone();
 
-            if anime_set.contains_key(anime) {
+            if anime_cache.contains_key(anime) {
                 continue;
             }
-            let tree = self.fetch_anime_set(anime, anime_set);
+            let tree = self.fetch_anime_cache(anime, anime_cache);
             if tree.contains(&source) {
                 return Some(anime.to_string());
             }
         }
 
-        for (anime, set) in anime_set {
-            if set.intersection(&source_set).next().is_some() {
+        for (anime, set) in anime_cache {
+            if set.contains_set(&source_set) {
                 return Some(anime.clone());
             }
         }
         None
     }
 
-    fn fetch_anime_set<'a>(
-        &'a self,
-        anime: &str,
-        anime_set: &'a mut HashMap<String, HashSet<String>>,
-    ) -> &HashSet<String> {
-        let set = anime_set.entry(anime.to_string()).or_default();
+    fn fetch_anime_cache<'a>(&'a self, anime: &str, anime_cache: &'a mut CacheMap) -> &Cache {
+        let cache = anime_cache.entry(anime.to_string()).or_default();
         let anime_dir = Path::new(&self.config.anime_path).join(anime);
 
-        Self::fetch_set(set, anime_dir);
-        set
+        Self::fetch_cache(cache, anime_dir);
+        cache
     }
 
     // 递归获取文件.
-    fn fetch_set<P: AsRef<Path>>(set: &mut HashSet<String>, dir_path: P) {
+    fn fetch_cache<P: AsRef<Path>>(cache: &mut Cache, dir_path: P) {
         let Ok(entries) = fs::read_dir(dir_path) else {
             return;
         };
@@ -291,9 +282,10 @@ impl Data {
             .flatten()
             .filter_map(Self::filter_file_dir)
             .for_each(|(name, path)| {
-                set.insert(name);
-                if path.as_os_str() != "" {
-                    Self::fetch_set(set, path);
+                if path.as_os_str() == "" {
+                    cache.insert(name);
+                } else if let Some(new) = cache.insert_cache(name) {
+                    Self::fetch_cache(new, path);
                 }
             });
     }
@@ -517,23 +509,29 @@ mod tests {
         }
     }
 
+    const ANIME_1: &str = "AIR [青空]";
+    const ANIME_2: &str = "Just Because!";
+    const ANIME_3: &str = "true tears [真实之泪]";
+    const ANIME_4: &str = "君の名は。 [你的名字。]";
+    const ANIME_4_SUB: [&str; 5] = [
+        "SPs",
+        "Season 01",
+        "[VCB-Studio] Kimi no Na wa [Ma10p_1080p]",
+        "[VCB-Studio] Kimi no Na wa [Ma10p_1080p][x265_flac].mkv",
+        "readme about WebP.txt",
+    ];
+
     fn temp_anime_dir(tep_dir: &TempDir) -> Result<&TempDir, Box<dyn Error>> {
         let binding = tep_dir.path().join("anime");
         let anime_path = binding.as_path();
         fs::create_dir(anime_path)?;
-        for i in ["AIR [青空]", "Just Because!", "true tears [真实之泪]"] {
+        for i in [ANIME_1, ANIME_2, ANIME_3] {
             fs::create_dir(anime_path.join(i))?;
         }
-        let binding = anime_path.join("君の名は。 [你的名字。]");
+        let binding = anime_path.join(ANIME_4);
         let nesting_path = binding.as_path();
         fs::create_dir(nesting_path)?;
-        for i in [
-            "SPs",
-            "Season 01",
-            "[VCB-Studio] Kimi no Na wa [Ma10p_1080p]",
-            "[VCB-Studio] Kimi no Na wa [Ma10p_1080p][x265_flac].mkv",
-            "readme about WebP.txt",
-        ] {
+        for i in ANIME_4_SUB {
             if i.ends_with(".mkv") | i.ends_with(".txt") {
                 File::create(nesting_path.join(i))?;
             } else {
@@ -555,22 +553,33 @@ mod tests {
         }
 
         #[test]
-        fn fetch_anime_set() {
+        fn fetch_anime_cache() {
             let tep_dir = tempdir_in("./").unwrap();
             temp_anime_dir(&tep_dir).unwrap();
             let mut data = create_data();
             data.config.anime_path = tep_dir.path().join("anime").to_str().unwrap().to_string();
-            let mut anime_set: HashMap<String, HashSet<String>> = HashMap::new();
-            let set = data.fetch_anime_set("君の名は。 [你的名字。]", &mut anime_set);
+            let mut anime_cache = CacheMap::default();
+            let set = data.fetch_anime_cache(ANIME_4, &mut anime_cache);
             assert_eq!(
                 set,
-                &HashSet::from([
-                    "[VCB-Studio] Kimi no Na wa [Ma10p_1080p][x265_flac].mkv".to_string(),
-                    "[VCB-Studio] Kimi no Na wa [Ma10p_1080p]".to_string(),
-                    "Season 01".to_string()
-                ]),
+                &Cache::Some(CacheMap::new(HashMap::from([
+                    (ANIME_4_SUB[3].to_string(), Cache::None),
+                    (ANIME_4_SUB[2].to_string(), Cache::default()),
+                    (ANIME_4_SUB[1].to_string(), Cache::default()),
+                ]))),
                 "set is {:?}",
                 set
+            );
+            assert_eq!(
+                anime_cache,
+                CacheMap::from([(
+                    ANIME_4.to_string(),
+                    Cache::Some(CacheMap::new(HashMap::from([
+                        (ANIME_4_SUB[1].to_string(), Cache::default()),
+                        (ANIME_4_SUB[2].to_string(), Cache::default()),
+                        (ANIME_4_SUB[3].to_string(), Cache::None),
+                    ])))
+                )])
             );
         }
     }
