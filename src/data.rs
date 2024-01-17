@@ -86,27 +86,26 @@ impl Data {
             }
         } else if fs_file_type.is_dir() {
             file_type = FileType::Dir;
-            let entries = fs::read_dir(dir_entry.path());
-            if let Ok(entries) = entries {
-                // 判断是否嵌套.
-                // 先判断是否有其他文件,
-                // 再生成子目录的 SourceAnimeMap.
-                let (dir, other): (Vec<_>, Vec<_>) = entries
-                    .into_iter()
-                    .map(|x| x.unwrap())
-                    .partition(|x| x.file_type().unwrap().is_dir());
-                if other.is_empty() {
-                    let maps = dir
-                        .iter()
-                        .map(|x| SourceAnimeMap {
-                            source: x.file_name().into_string().unwrap(),
-                            anime: "".to_string(),
-                            active: true,
-                            file_type: FileType::Dir,
-                        })
-                        .collect();
-                    file_type = FileType::Nesting(maps);
-                }
+            // 判断是否嵌套.
+            // 先判断是否有其他文件,
+            // 再生成子目录的 SourceAnimeMap.
+            let (dir, other): (Vec<_>, Vec<_>) = fs::read_dir(dir_entry.path())
+                .into_iter()
+                .flatten()
+                .flatten()
+                .partition(|x| x.file_type().unwrap().is_dir());
+            // FIXME: 优化这个逻辑.
+            if other.is_empty() {
+                let maps = dir
+                    .iter()
+                    .map(|x| SourceAnimeMap {
+                        source: x.file_name().into_string().unwrap(),
+                        anime: "".to_string(),
+                        active: true,
+                        file_type: FileType::Dir,
+                    })
+                    .collect();
+                file_type = FileType::Nesting(maps);
             }
         }
         file_type
@@ -114,13 +113,11 @@ impl Data {
 
     pub fn push_anime_from_dir(&mut self) -> Result<(), Box<dyn Error>> {
         let anime_dir = &self.config.anime_path;
-        let entries = fs::read_dir(anime_dir);
-        for dir_entry in entries? {
-            let dir_entry = dir_entry?;
-            let name = dir_entry.file_name().into_string().unwrap();
+        fs::read_dir(anime_dir)?
+            .flatten()
+            .flat_map(|dir_entry| dir_entry.file_name().into_string())
+            .for_each(|name| self.data.push_anime(name.to_string()));
 
-            self.data.push_anime(name);
-        }
         Ok(())
     }
 
@@ -155,29 +152,27 @@ impl Data {
         anime_cache: &mut CacheMap,
     ) -> Option<Vec<(usize, usize, String)>> {
         let mut indexes = Vec::<(usize, usize, String)>::new();
-        for (i, map) in source_anime_maps.iter().enumerate() {
-            if !map.active {
-                continue;
-            }
-            if let FileType::Other = map.file_type {
-                continue;
-            }
-            if let FileType::Nesting(nesting) = &map.file_type {
-                let nesting_indexes = self.need_reflink_anime_indexes(nesting, anime_cache);
-                if let Some(nesting_indexes) = nesting_indexes {
-                    indexes.extend(nesting_indexes.iter().map(|x| (i, x.0, x.2.clone())));
+        source_anime_maps
+            .iter()
+            .enumerate()
+            .filter(|(_, map)| map.active())
+            .for_each(|(i, map)| {
+                if let FileType::Nesting(nesting) = &map.file_type {
+                    let nesting_indexes = self.need_reflink_anime_indexes(nesting, anime_cache);
+                    if let Some(nesting_indexes) = nesting_indexes {
+                        indexes.extend(nesting_indexes.iter().map(|x| (i, x.0, x.2.clone())));
+                    }
+                    // TODO: 设置 Nesting 父级的 anime 名.
+                } else if map.anime.is_empty() {
+                    let source = map.source.clone();
+                    let anime = self.find_exist_anime(source, anime_cache);
+                    if let Some(anime) = anime {
+                        indexes.push((i, 0, anime));
+                    }
+                } else {
+                    indexes.push((i, 0, map.anime.clone()));
                 }
-            } else if map.anime.is_empty() {
-                let source = map.source.clone();
-                let anime = self.find_exist_anime(source, anime_cache);
-                if anime.is_some() {
-                    let anime = anime.unwrap();
-                    indexes.push((i, 0, anime));
-                }
-            } else {
-                indexes.push((i, 0, map.anime.clone()));
-            }
-        }
+            });
         if !indexes.is_empty() {
             Some(indexes)
         } else {
@@ -201,26 +196,31 @@ impl Data {
     }
 
     fn find_exist_anime(&self, source: String, anime_cache: &mut CacheMap) -> Option<String> {
-        for (anime, cache) in anime_cache.iter() {
-            if cache.contains(&source) {
-                return Some(anime.clone());
-            }
+        if let Some(anime) = anime_cache
+            .iter()
+            .find(|(_, c)| c.contains(&source))
+            .map(|(a, _)| a)
+        {
+            return Some(anime.clone());
         }
 
         let source_path = Path::new(&self.config.source_path).join(&source);
         let mut source_set: HashSet<String> = HashSet::new();
         if let Ok(entries) = fs::read_dir(source_path) {
-            for dir_entry in entries.flatten() {
-                let Some((name, _)) = Self::filter_file_dir(dir_entry) else {
-                    continue;
-                };
-                source_set.insert(name);
-            }
-        }
-        for (anime, cache) in &mut *anime_cache {
-            if cache.contains_set(&source_set) {
-                return Some(anime.clone());
-            }
+            entries
+                .flatten()
+                .filter_map(Self::filter_file_dir)
+                .for_each(|(name, _)| {
+                    source_set.insert(name);
+                });
+        };
+
+        if let Some(anime) = anime_cache
+            .iter()
+            .find(|(_, c)| c.contains_set(&source_set))
+            .map(|(a, _)| a)
+        {
+            return Some(anime.clone());
         }
 
         // cannot borrow `*self` as mutable more than once at a time
@@ -548,7 +548,7 @@ mod tests {
             Data {
                 data: get_real_data(),
                 source_map: HashMap::new(),
-                config: Config::new(&[]),
+                config: Config::new([].into_iter()),
             }
         }
 

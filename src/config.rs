@@ -1,4 +1,4 @@
-use std::{borrow::Cow, fmt};
+use std::fmt;
 
 #[derive(Debug)]
 pub struct Config {
@@ -9,25 +9,18 @@ pub struct Config {
 }
 
 impl Config {
-    pub fn new(args: &[String]) -> Config {
-        let action: Action = match args.get(1) {
+    pub fn new(args: impl Iterator<Item = String>) -> Config {
+        let mut args = args.skip(1);
+        let action: Action = match args.next() {
             Some(x) => Action::from(x.as_str()),
-            _ => Action::Test,
+            None => Action::Test,
         };
-        let mapfile_path = args
-            .get(2) // 存在所有权问题，不使用 `unwrap_or_else`.
-            .unwrap_or(&".data/data.yaml".to_string())
-            .to_string();
-        let source_path = args
-            .get(3)
-            .map(Cow::Borrowed) // 用 Cow 解决 `unwrap_or_else` 的所有权问题.
-            .unwrap_or_else(|| Cow::Owned(String::from("X:\\SOURCE")))
-            .to_string();
-        let anime_path = args
-            .get(4)
-            .map(Cow::Borrowed)
-            .unwrap_or_else(|| Cow::Owned("X:\\ANIME".to_string()))
-            .to_string();
+        let mapfile_path = match args.next() {
+            Some(arg) => arg,
+            None => ".data/data.yaml".to_string(),
+        };
+        let source_path = args.next().unwrap_or("X:\\SOURCE".to_string());
+        let anime_path = args.next().unwrap_or("X:\\ANIME".to_string());
 
         Config {
             action,
@@ -74,7 +67,7 @@ mod tests {
     #[test]
     fn config() {
         let args: Vec<String> = vec![];
-        let config = Config::new(&args);
+        let config = Config::new(args.into_iter());
         assert_eq!(config.action.to_string(), Action::Test.to_string());
         assert_eq!(
             config.mapfile_path, ".data/data.yaml",
@@ -91,7 +84,7 @@ mod tests {
             "./SOURCE".to_string(),
             "./ANIME".to_string(),
         ];
-        let config = Config::new(&args);
+        let config = Config::new(args.into_iter());
         assert_eq!(config.action.to_string(), Action::Renew.to_string());
         assert_eq!(
             config.mapfile_path, ".data/data.1.yaml",
@@ -102,7 +95,7 @@ mod tests {
         assert_eq!(config.anime_path, "./ANIME");
 
         let args = vec!["".to_string(), "reflink".to_string()];
-        let config = Config::new(&args);
+        let config = Config::new(args.into_iter());
         assert_eq!(config.action.to_string(), Action::Reflink.to_string());
     }
 

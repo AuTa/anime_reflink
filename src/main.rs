@@ -10,11 +10,9 @@ use anime_reflink::data::Data;
 fn main() -> Result<(), Box<dyn Error>> {
     let start_time: NaiveTime = Utc::now().time();
 
-    let args: Vec<String> = env::args().collect();
+    let config = Config::new(env::args());
 
-    let config = Config::new(&args);
-
-    println!("Searching for {}", config.action);
+    println!("Run for {}", config.action);
     println!("In file {}", config.mapfile_path);
     println!("In source {}", config.source_path);
     println!("In anime {}", config.anime_path);
