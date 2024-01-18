@@ -10,7 +10,7 @@ use std::{
 use crate::{
     cache::{Cache, CacheMap},
     config::{Action, Config},
-    source_anime_map::{FileType, SourceAnimeMap},
+    source_anime_map::{FileType, SourceAnimeMap, Value},
 };
 
 // data.yaml 的结构体.
@@ -94,7 +94,6 @@ impl Data {
                 .flatten()
                 .flatten()
                 .partition(|x| x.file_type().unwrap().is_dir());
-            // FIXME: 优化这个逻辑.
             if other.is_empty() {
                 let maps = dir
                     .iter()
@@ -162,7 +161,6 @@ impl Data {
                     if let Some(nesting_indexes) = nesting_indexes {
                         indexes.extend(nesting_indexes.iter().map(|x| (i, x.0, x.2.clone())));
                     }
-                    // TODO: 设置 Nesting 父级的 anime 名.
                 } else if map.anime.is_empty() {
                     let source = map.source.clone();
                     let anime = self.find_exist_anime(source, anime_cache);
@@ -421,37 +419,21 @@ impl RealData {
         }
     }
 
-    // 批量设置 map 的值.
-    fn set_batch_map<T>(
-        &mut self,
-        queue: &Vec<(usize, usize, T)>,
-        f: fn(&mut SourceAnimeMap, &T),
-    ) {
-        for i in queue {
-            match &mut self.source_anime_maps[i.0].file_type {
-                FileType::Nesting(maps) => {
-                    f(&mut maps[i.1], &i.2);
-                }
-                _ => f(&mut self.source_anime_maps[i.0], &i.2),
-            }
-        }
-    }
-
     // 设置索引处的 map 的 anime name.
-    fn set_anime_name(&mut self, reflink_queue: &Vec<(usize, usize, String)>) {
-        // fn set<T: ToString>(map: &mut SourceAnimeMap, name: T) {
-        //     map.anime = name.to_string();
-        // }
-        let set = |map: &mut SourceAnimeMap, name: &String| map.anime = name.to_string();
-        self.set_batch_map::<String>(reflink_queue, set)
+    fn set_anime_name(&mut self, reflink_queue: &[(usize, usize, String)]) {
+        reflink_queue.iter().for_each(|i| {
+            self.source_anime_maps[i.0]
+                .set_anime(Value::Index((i.1, &i.2)))
+                .unwrap();
+        });
     }
 
-    fn set_map_active(&mut self, successed_index: &Vec<(usize, usize, bool)>) {
-        // fn set(map: &mut SourceAnimeMap, i: bool) {
-        //     map.active = i;
-        // }
-        let set = |map: &mut SourceAnimeMap, i: &bool| map.active = *i;
-        self.set_batch_map::<bool>(successed_index, set)
+    fn set_map_active(&mut self, successed_index: &[(usize, usize, bool)]) {
+        successed_index.iter().for_each(|i| {
+            self.source_anime_maps[i.0]
+                .set_active(Value::Index((i.1, i.2)))
+                .unwrap();
+        });
     }
 }
 
@@ -603,12 +585,12 @@ mod tests {
         #[test]
         fn set_anime_name() {
             let mut real_data = get_real_data();
-            real_data.set_anime_name(&vec![(0, 0, "new_anime".to_string())]);
+            real_data.set_anime_name(&[(0, 0, "new_anime".to_string())]);
             assert_eq!(
                 real_data.source_anime_maps[0].anime,
                 "new_anime".to_string()
             );
-            real_data.set_anime_name(&vec![(2, 1, "new_nesting_anime".to_string())]);
+            real_data.set_anime_name(&[(2, 1, "new_nesting_anime".to_string())]);
             let FileType::Nesting(nesting) = &real_data.source_anime_maps[2].file_type else {
                 panic!("")
             };
@@ -619,16 +601,16 @@ mod tests {
         fn set_map_active() {
             let mut real_data = get_real_data();
 
-            real_data.set_map_active(&vec![(0, 0, false)]);
+            real_data.set_map_active(&[(0, 0, false)]);
             assert!(!real_data.source_anime_maps[0].active);
 
-            real_data.set_map_active(&vec![(2, 1, false)]);
+            real_data.set_map_active(&[(2, 1, false)]);
             let FileType::Nesting(nesting) = &real_data.source_anime_maps[2].file_type else {
                 panic!("")
             };
             assert!(!nesting[1].active);
 
-            real_data.set_map_active(&vec![(0, 0, true)]);
+            real_data.set_map_active(&[(0, 0, true)]);
             assert!(real_data.source_anime_maps[0].active);
         }
     }
