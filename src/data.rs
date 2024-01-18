@@ -422,17 +422,17 @@ impl RealData {
     }
 
     // 批量设置 map 的值.
-    fn set_batch_map<T: Clone>(
+    fn set_batch_map<T>(
         &mut self,
         queue: &Vec<(usize, usize, T)>,
-        f: fn(&mut SourceAnimeMap, T),
+        f: fn(&mut SourceAnimeMap, &T),
     ) {
         for i in queue {
             match &mut self.source_anime_maps[i.0].file_type {
                 FileType::Nesting(maps) => {
-                    f(&mut maps[i.1], i.2.clone());
+                    f(&mut maps[i.1], &i.2);
                 }
-                _ => f(&mut self.source_anime_maps[i.0], i.2.clone()),
+                _ => f(&mut self.source_anime_maps[i.0], &i.2),
             }
         }
     }
@@ -442,7 +442,7 @@ impl RealData {
         // fn set<T: ToString>(map: &mut SourceAnimeMap, name: T) {
         //     map.anime = name.to_string();
         // }
-        let set = |map: &mut SourceAnimeMap, name: String| map.anime = name;
+        let set = |map: &mut SourceAnimeMap, name: &String| map.anime = name.to_string();
         self.set_batch_map::<String>(reflink_queue, set)
     }
 
@@ -450,7 +450,7 @@ impl RealData {
         // fn set(map: &mut SourceAnimeMap, i: bool) {
         //     map.active = i;
         // }
-        let set = |map: &mut SourceAnimeMap, i: bool| map.active = i;
+        let set = |map: &mut SourceAnimeMap, i: &bool| map.active = *i;
         self.set_batch_map::<bool>(successed_index, set)
     }
 }
