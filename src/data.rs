@@ -8,7 +8,7 @@ use std::{
 };
 
 use crate::{
-    cache::{Cache, CacheMap},
+    cache::Cache,
     config::{Action, Config},
     source_anime_map::{FileType, SourceAnimeMap, Value},
 };
@@ -129,7 +129,7 @@ impl Data {
     }
 
     pub fn map_animes(&mut self) -> Result<(), Box<dyn Error>> {
-        let mut anime_cache = CacheMap::default();
+        let mut anime_cache = Cache::default();
         let maps = &self.data.source_anime_maps;
         let reflink_queue = self.need_reflink_anime_indexes(maps, &mut anime_cache);
         let Some(reflink_queue) = reflink_queue else {
@@ -148,7 +148,7 @@ impl Data {
     fn need_reflink_anime_indexes(
         &self,
         source_anime_maps: &[SourceAnimeMap],
-        anime_cache: &mut CacheMap,
+        anime_cache: &mut Cache,
     ) -> Option<Vec<(usize, usize, String)>> {
         let mut indexes = Vec::<(usize, usize, String)>::new();
         source_anime_maps
@@ -193,7 +193,7 @@ impl Data {
         successed_index
     }
 
-    fn find_exist_anime(&self, source: String, anime_cache: &mut CacheMap) -> Option<String> {
+    fn find_exist_anime(&self, source: String, anime_cache: &mut Cache) -> Option<String> {
         if let Some(anime) = anime_cache
             .iter()
             .find(|(_, c)| c.contains(&source))
@@ -257,8 +257,8 @@ impl Data {
         None
     }
 
-    fn fetch_anime_cache<'a>(&'a self, anime: &str, anime_cache: &'a mut CacheMap) -> &Cache {
-        let cache = anime_cache.entry(anime.to_string()).or_default();
+    fn fetch_anime_cache<'a>(&'a self, anime: &str, anime_cache: &'a mut Cache) -> &Cache {
+        let cache = anime_cache.entry(anime).unwrap().or_default().as_mut();
         let anime_dir = Path::new(&self.config.anime_path).join(anime);
 
         Self::fetch_cache(cache, anime_dir);
@@ -281,8 +281,8 @@ impl Data {
             .filter_map(Self::filter_file_dir)
             .for_each(|(name, path)| {
                 if path.as_os_str() == "" {
-                    cache.insert(name);
-                } else if let Some(new) = cache.insert_cache(name) {
+                    cache.insert_none(&name);
+                } else if let Some(new) = cache.insert_default(&name) {
                     Self::fetch_cache(new, path);
                 }
             });
@@ -540,27 +540,27 @@ mod tests {
             temp_anime_dir(&tep_dir).unwrap();
             let mut data = create_data();
             data.config.anime_path = tep_dir.path().join("anime").to_str().unwrap().to_string();
-            let mut anime_cache = CacheMap::default();
+            let mut anime_cache = Cache::default();
             let set = data.fetch_anime_cache(ANIME_4, &mut anime_cache);
             assert_eq!(
                 set,
-                &Cache::Some(CacheMap::new(HashMap::from([
-                    (ANIME_4_SUB[3].to_string(), Cache::None),
-                    (ANIME_4_SUB[2].to_string(), Cache::default()),
-                    (ANIME_4_SUB[1].to_string(), Cache::default()),
-                ]))),
+                &Cache::from([
+                    (ANIME_4_SUB[3], Cache::None),
+                    (ANIME_4_SUB[2], Cache::default()),
+                    (ANIME_4_SUB[1], Cache::default()),
+                ]),
                 "set is {:?}",
                 set
             );
             assert_eq!(
                 anime_cache,
-                CacheMap::from([(
-                    ANIME_4.to_string(),
-                    Cache::Some(CacheMap::new(HashMap::from([
-                        (ANIME_4_SUB[1].to_string(), Cache::default()),
-                        (ANIME_4_SUB[2].to_string(), Cache::default()),
-                        (ANIME_4_SUB[3].to_string(), Cache::None),
-                    ])))
+                Cache::from([(
+                    ANIME_4,
+                    Cache::from([
+                        (ANIME_4_SUB[1], Cache::default()),
+                        (ANIME_4_SUB[2], Cache::default()),
+                        (ANIME_4_SUB[3], Cache::None),
+                    ])
                 )])
             );
         }
